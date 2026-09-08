@@ -86,6 +86,37 @@ Copilot sessions run in SDK empty mode with no available tools, repository instr
 
 Copilot fails closed. Missing permissions, authentication/policy failures, exhausted retries, empty output, and invalid review JSON abort the run rather than being interpreted as a clean review.
 
+### Diagnosing a failed request
+
+Copilot failures include the phase (`runtime_start`, `create_session`, or
+`send_and_wait`), error source, HTTP status when available, recognized SDK
+error type/code and remediation action. These diagnostics survive retries and appear in
+the final CLI error. Session errors are observed directly: the SDK's
+`send_and_wait()` exception otherwise discards their structured metadata.
+
+Authentication and other non-transient HTTP 4xx failures stop immediately;
+429 throttling, 5xx, connection failures and unclassified failures retain bounded
+retries. Explicit quota/billing and context-limit errors stop rather than retrying
+an unchanged request.
+A 403 means access was denied, not that any particular organization policy is
+disabled. Compare the failing run's token permissions, authentication path and
+model access before changing them. Remediation labels are diagnostic only:
+PRLens never enables tools or relaxes isolation in response to one.
+
+Diagnostics deliberately omit raw SDK messages, traces, URLs, request payloads
+and review output. Recognized failure wording is converted to fixed,
+application-authored messages; unknown text is not printed, since redacting
+credentials alone cannot remove arbitrary private source snippets. Python SDK
+logs are suppressed only within PRLens Copilot calls, including cleanup, and
+safe provider diagnostics are emitted instead. Do not upload raw runtime logs
+or enable traceback dumps to diagnose private reviews.
+
+The diagnostics identify failure evidence, not a guaranteed remedy. If a failure
+only occurs in Actions, publish and pin the diagnostic action revision, then start
+a new workflow run using that pin. Rerunning an old run still uses its original
+workflow revision. Keep the configured model and authentication restrictions
+unchanged until the diagnostics support a specific change.
+
 ### Organization policy and billing
 
 For organization-owned repositories, enable **Allow use of Copilot CLI billed to the organization** in the organization's Copilot policy. The workflow needs:
