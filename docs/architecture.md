@@ -28,7 +28,7 @@ prlens (CLI)
 │   ├── PyGithub
 │   ├── pyyaml
 │   ├── python-dotenv
-│   └── anthropic / openai  (optional extras)
+│   └── anthropic / openai / copilot  (optional extras)
 └── prlens-store
     └── PyGithub
 ```
@@ -57,6 +57,7 @@ BaseReviewer
 
 AnthropicReviewer(_call_api → anthropic SDK)
 OpenAIReviewer(_call_api → openai SDK)
+CopilotReviewer(_call_api → tool-free Copilot SDK session)
 ```
 
 Subclasses implement **only** `__init__` (validate and store the SDK client) and `_call_api` (make one raw API call and return the text response).

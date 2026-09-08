@@ -43,17 +43,61 @@ Then add `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) to your repository secrets:
 
 ---
 
+## GitHub Copilot without a provider secret
+
+The Copilot provider is currently supplied by the `damianh/prlens` fork. Pin the action to the full commit SHA that contains this feature:
+
+```yaml
+name: PR Lens Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      copilot-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - uses: damianh/prlens/.github/actions/review@<full-commit-sha>
+        with:
+          model: copilot
+          github-token: ${{ github.token }}
+```
+
+No Anthropic key, OpenAI key, PAT, or GitHub App installation is needed. The action installs all three PRLens packages from its own pinned fork revision, then provisions the matching managed Copilot runtime. The `version` input applies only to PyPI-backed Anthropic/OpenAI installations.
+
+Before using this workflow, enable **Allow use of Copilot CLI billed to the organization** in the organization's Copilot policy. Usage for organization-owned repositories is billed to that organization and is subject to its model and billing policies; it does not use an individual user's budget.
+
+The fork guard and base-SHA checkout are deliberate. Ordinary fork PR workflows generally cannot receive the required write permissions, and pull-request changes must not be allowed to replace the reviewer configuration or installed provider. Do not use `pull_request_target` to execute untrusted PR code as a workaround.
+
+Copilot runs without model tools or repository access. PRLens fetches PR-head content through GitHub APIs and sends it as untrusted prompt data. This is not an OS sandbox: the managed runtime still contacts Copilot and uses temporary runtime/state files. For broader agentic automation, GitHub recommends guarded [Agentic Workflows](https://github.com/github/gh-aw).
+
+---
+
 ## Action Inputs
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `model` | No | `anthropic` | AI provider: `anthropic` or `openai` |
+| `model` | No | `anthropic` | AI provider: `anthropic`, `openai`, or `copilot` |
 | `github-token` | **Yes** | — | GitHub token with `pull-requests: write` |
 | `anthropic-api-key` | No | `""` | Required when `model: anthropic` |
 | `openai-api-key` | No | `""` | Required when `model: openai` |
 | `guidelines` | No | `""` | Path to a Markdown guidelines file (relative to repo root) |
 | `config-path` | No | `.prlens.yml` | Path to `.prlens.yml` (relative to repo root) |
 | `full-review` | No | `false` | Set to `true` to re-review all files on every run |
+
+The caller grants workflow permissions; a composite action cannot add `copilot-requests: write` itself.
 
 ---
 
@@ -70,7 +114,7 @@ Both are injected automatically by the Actions runner when the workflow triggers
 
 ## GITHUB_TOKEN vs Personal Access Token
 
-The built-in `GITHUB_TOKEN` (provided automatically by GitHub Actions) is sufficient to post review comments. It acts as the `github-actions[bot]` user, not as any real developer.
+The built-in `GITHUB_TOKEN` (provided automatically by GitHub Actions) is sufficient to post review comments. With `copilot-requests: write`, it also authenticates the Copilot provider. It acts as the `github-actions[bot]` user, not as any real developer.
 
 ```yaml
 github-token: ${{ secrets.GITHUB_TOKEN }}   # default — use this
@@ -139,6 +183,10 @@ steps:
     openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
+## Using Copilot
+
+Use the complete pinned example above. `prlens init` can generate it after you provide the full commit SHA for the Copilot-enabled fork action. The token-only Copilot wizard does not offer Gist storage because the workflow token has no Gist scope.
+
 ---
 
 ## Full Example with All Options
@@ -179,5 +227,6 @@ jobs:
 | `ANTHROPIC_API_KEY` | If using Claude | Add in repo Settings → Secrets → Actions |
 | `OPENAI_API_KEY` | If using GPT-4o | Add in repo Settings → Secrets → Actions |
 | `GITHUB_TOKEN` | **Auto-provided** | Do not add manually |
+| Provider API key | Not needed for Copilot | Uses `${{ github.token }}` with `copilot-requests: write` |
 | `PRLENS_GITHUB_TOKEN` | Only if using a custom bot user | PAT with `pull_requests: write` |
 | `GUIDELINES_REPO_TOKEN` | Only if guidelines repo is private | PAT with `contents: read` on guidelines repo |

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import click
 from rich.console import Console
 
@@ -51,7 +53,7 @@ def _summary_to_record(summary: ReviewSummary, pr_title: str, model: str) -> Rev
 )
 @click.option(
     "--model",
-    type=click.Choice(["anthropic", "openai"]),
+    type=click.Choice(["anthropic", "openai", "copilot"]),
     default=None,
     help="AI model provider. Overrides config file.",
 )
@@ -96,15 +98,18 @@ def review_cmd(
     """AI-powered GitHub PR code reviewer.
 
     Fetches a pull request, reviews each changed file against your coding
-    guidelines using Claude or GPT-4o, and posts inline comments on GitHub.
+    guidelines using Claude, GPT-4o, or GitHub Copilot, and posts inline comments on GitHub.
 
     \b
     Required environment variables:
       GITHUB_TOKEN         GitHub personal access token (or use gh CLI)
       ANTHROPIC_API_KEY    Required when using --model anthropic
       OPENAI_API_KEY       Required when using --model openai
+
+    Copilot requires an explicit GITHUB_TOKEN and Python 3.11 or later.
     """
     from prlens_core.config import load_config
+    from prlens_core.providers.base import ProviderError
     from prlens_cli.auth import resolve_github_token
 
     config = load_config(config_path, cli_overrides={"model": model, "guidelines": guidelines_path})
@@ -112,8 +117,17 @@ def review_cmd(
     app_id = config.get("github_app_id")
     private_key = config.get("github_app_private_key")
 
+    if config["model"] == "copilot":
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            raise click.UsageError(
+                "The Copilot provider requires an explicit GITHUB_TOKEN. "
+                "In GitHub Actions, grant the workflow 'copilot-requests: write'."
+            )
+        config["github_token"] = token
+
     if not (app_id and private_key):
-        token = resolve_github_token()
+        token = config.get("github_token") or resolve_github_token()
         if not token:
             raise click.UsageError(
                 "No GitHub credentials found. Set GITHUB_TOKEN, run 'gh auth login', "
@@ -147,15 +161,18 @@ def review_cmd(
     pr_obj = get_pull(this_repo, pr_number)
     pr_title = pr_obj.title or ""
 
-    summary = run_review(
-        repo=repo,
-        pr_number=pr_number,
-        config=config,
-        auto_confirm=yes,
-        shadow=shadow,
-        force_full=full_review,
-        repo_obj=this_repo,
-    )
+    try:
+        summary = run_review(
+            repo=repo,
+            pr_number=pr_number,
+            config=config,
+            auto_confirm=yes,
+            shadow=shadow,
+            force_full=full_review,
+            repo_obj=this_repo,
+        )
+    except ProviderError as exc:
+        raise click.ClickException(str(exc)) from None
 
     # Persist to store — only if the review completed (not draft-skip / no-new-commits).
     if summary is not None:

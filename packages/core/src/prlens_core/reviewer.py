@@ -14,6 +14,7 @@ from rich.console import Console
 from prlens_core.config import load_guidelines
 from prlens_core.gh.pull_request import get_diff, get_incremental_files, get_last_reviewed_sha, get_pull, get_repo
 from prlens_core.providers.anthropic import AnthropicReviewer
+from prlens_core.providers.copilot import CopilotReviewer
 from prlens_core.providers.openai import OpenAIReviewer
 from prlens_core.utils.code import is_code_file
 from prlens_core.utils.context import RepoContext, gather_context
@@ -49,7 +50,13 @@ def _get_reviewer(config: dict):
         return AnthropicReviewer(api_key=config["anthropic_api_key"])
     if model == "openai":
         return OpenAIReviewer(api_key=config["openai_api_key"])
-    raise ValueError(f"Unknown model provider: {model!r}. Choose 'anthropic' or 'openai'.")
+    if model == "copilot":
+        return CopilotReviewer(
+            github_token=config["github_token"],
+            model=config.get("copilot_model"),
+            timeout=config.get("copilot_timeout", 120),
+        )
+    raise ValueError(f"Unknown model provider: {model!r}. Choose 'anthropic', 'openai', or 'copilot'.")
 
 
 def _is_excluded(filename: str, patterns: list[str]) -> bool:

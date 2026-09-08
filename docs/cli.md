@@ -29,7 +29,8 @@ Usage: prlens review [OPTIONS]
 Options:
   --repo TEXT                GitHub repository (owner/name).  [required]
   --pr INTEGER               Pull request number. Omit to pick interactively.
-  --model [anthropic|openai] AI provider. Overrides config file.
+  --model [anthropic|openai|copilot]
+                             AI provider. Overrides config file.
   --guidelines PATH          Markdown guidelines file. Overrides config file.
   --config TEXT              Config file path.  [default: .prlens.yml]
   -y, --yes                  Skip confirmation prompts.
@@ -41,9 +42,11 @@ Options:
 
 | Variable | When Required |
 |---|---|
-| `GITHUB_TOKEN` | Always (or `gh auth login` fallback) |
+| `GITHUB_TOKEN` | Always; Copilot requires this explicit variable and does not use the `gh` fallback |
 | `ANTHROPIC_API_KEY` | When `model: anthropic` |
 | `OPENAI_API_KEY` | When `model: openai` |
+
+Copilot also requires Python 3.11+, the `copilot` extra, organization policy approval, and `copilot-requests: write` in Actions.
 
 ### Examples
 
@@ -100,12 +103,14 @@ Options:
 ### Wizard Prompts
 
 1. **Repository** — auto-detected from `git remote get-url origin`. Supports both HTTPS and SSH remotes.
-2. **AI provider** — `anthropic` (default) or `openai`.
+2. **AI provider** — `anthropic` (default), `openai`, or `copilot`.
 3. **Store backend**:
    - `none` (default) — no persistence
    - `sqlite` — local SQLite file; prompts for path (default: `.prlens.db`)
-   - `gist` — shared GitHub Gist; creates the Gist automatically via `gh` CLI
+   - `gist` — shared GitHub Gist; creates the Gist automatically via `gh` CLI (not offered by the token-only Copilot Actions path)
 4. **GitHub Actions workflow** — optionally generates `.github/workflows/prlens.yml`.
+
+For Copilot, the wizard asks for a full commit SHA of the Copilot-enabled `damianh/prlens` action. The generated workflow pins that revision, skips fork PRs, and checks out the trusted PR base SHA.
 
 ### What `init` Creates
 

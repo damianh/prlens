@@ -43,8 +43,13 @@ Installing `prlens` pulls in `prlens-core` and `prlens-store` automatically.
 ```bash
 pip install 'prlens[anthropic]'   # Claude (default)
 pip install 'prlens[openai]'      # GPT-4o
-pip install 'prlens[all]'         # both providers
+pip install 'prlens[all]'         # all providers available on this Python
 ```
+
+This fork also supports organization-billed GitHub Copilot in Actions on Python
+3.11+. Until that support is released upstream, clone the fork and install
+`packages/core[copilot]`, `packages/store`, and `packages/cli`, or use its
+composite action pinned to a full commit SHA.
 
 ---
 
@@ -136,7 +141,8 @@ Usage: prlens review [OPTIONS]
 Options:
   --repo TEXT                  GitHub repository (owner/name). [required]
   --pr INTEGER                 Pull request number. Omit to pick interactively.
-  --model [anthropic|openai]   AI provider. Overrides config file.
+  --model [anthropic|openai|copilot]
+                                AI provider. Overrides config file.
   --guidelines PATH            Markdown guidelines file. Overrides config file.
   --config TEXT                Config file path. [default: .prlens.yml]
   -y, --yes                    Skip confirmation prompts.
@@ -190,8 +196,12 @@ Options:
 `.prlens.yml` in your repository root:
 
 ```yaml
-# AI provider: anthropic | openai
+# AI provider: anthropic | openai | copilot
 model: anthropic
+
+# Optional for model: copilot
+# copilot_model: gpt-5
+copilot_timeout: 120
 
 # Review history store: noop (default) | gist | sqlite | webhook
 # store: gist

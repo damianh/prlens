@@ -7,8 +7,12 @@ prlens is configured via a `.prlens.yml` file in your repository root. All keys 
 ## Full Reference
 
 ```yaml
-# AI provider: anthropic | openai
+# AI provider: anthropic | openai | copilot
 model: anthropic
+
+# Optional Copilot settings. Omit copilot_model to use the runtime default.
+# copilot_model: gpt-5
+copilot_timeout: 120
 
 # Review history store: noop (default) | sqlite | gist | webhook
 store: noop
@@ -54,7 +58,9 @@ review_draft_prs: false
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `model` | string | `anthropic` | AI provider: `anthropic` or `openai` |
+| `model` | string | `anthropic` | AI provider: `anthropic`, `openai`, or `copilot` |
+| `copilot_model` | string | — | Optional Copilot model ID; omitted uses runtime default |
+| `copilot_timeout` | number | `120` | Positive per-attempt Copilot deadline in seconds |
 | `store` | string | `noop` | History backend: `noop`, `sqlite`, `gist`, or `webhook` |
 | `store_path` | string | `.prlens.db` | SQLite file path (only used with `store: sqlite`) |
 | `gist_id` | string | — | GitHub Gist ID (only used with `store: gist`) |
@@ -91,7 +97,7 @@ Flags passed on the command line take precedence over `.prlens.yml`:
 
 ```bash
 # Use a different provider just for this run
-prlens review --repo owner/repo --pr 42 --model openai
+prlens review --repo owner/repo --pr 42 --model copilot
 
 # Use a different guidelines file just for this run
 prlens review --repo owner/repo --pr 42 --guidelines ./strict-guidelines.md

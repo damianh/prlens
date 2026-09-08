@@ -14,6 +14,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import click
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -22,6 +24,7 @@ from prlens_cli.commands.init import (
     _create_team_gist,
     _detect_repo_from_git,
     _get_version,
+    _validate_commit_sha,
     _write_config,
     _write_workflow,
 )
@@ -259,6 +262,43 @@ class TestWriteWorkflow:
         content = (tmp_path / ".github" / "workflows" / "prlens.yml").read_text()
         assert "pull_request" in content
 
+    def test_copilot_workflow_is_pinned_and_uses_workflow_token(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        sha = "a" * 40
+
+        _write_workflow("copilot", None, action_ref=sha)
+
+        content = (tmp_path / ".github" / "workflows" / "prlens.yml").read_text()
+        assert f"damianh/prlens/.github/actions/review@{sha}" in content
+        assert "github-token: ${{ github.token }}" in content
+        assert "ANTHROPIC_API_KEY" not in content
+        assert "OPENAI_API_KEY" not in content
+
+    def test_copilot_workflow_uses_trusted_base_and_skips_forks(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        _write_workflow("copilot", None, action_ref="b" * 40)
+
+        content = (tmp_path / ".github" / "workflows" / "prlens.yml").read_text()
+        assert "head.repo.full_name == github.repository" in content
+        assert "ref: ${{ github.event.pull_request.base.sha }}" in content
+        assert "persist-credentials: false" in content
+        assert "copilot-requests: write" in content
+
+    def test_copilot_workflow_requires_commit_sha(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ValueError, match="commit SHA"):
+            _write_workflow("copilot", None)
+
+
+class TestValidateCommitSha:
+    def test_accepts_full_sha(self):
+        assert _validate_commit_sha("A" * 40) == "a" * 40
+
+    def test_rejects_branch_name(self):
+        with pytest.raises(click.BadParameter, match="40-character"):
+            _validate_commit_sha("main")
+
 
 # ---------------------------------------------------------------------------
 # init_cmd (full Click integration)
@@ -314,6 +354,22 @@ class TestInitCmd:
 
         config = yaml.safe_load((tmp_path / ".prlens.yml").read_text())
         assert config["model"] == "openai"
+
+    def test_copilot_provider_writes_config_and_safe_workflow(self, mocker, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _patch_cli(mocker)
+        mocker.patch("prlens_cli.commands.init._detect_repo_from_git", return_value="owner/repo")
+        sha = "c" * 40
+
+        result = CliRunner().invoke(main, ["init"], input=f"copilot\nnone\nY\n{sha}\n")
+
+        assert result.exit_code == 0
+        config = yaml.safe_load((tmp_path / ".prlens.yml").read_text())
+        assert config["model"] == "copilot"
+        workflow = (tmp_path / ".github" / "workflows" / "prlens.yml").read_text()
+        assert f"@{sha}" in workflow
+        assert "copilot-requests: write" in workflow
+        assert "ANTHROPIC_API_KEY" not in result.output
 
     def test_sqlite_store_written_to_config(self, mocker, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

@@ -22,7 +22,7 @@ What actually happened.
 - prlens version:
 - Python version:
 - OS:
-- Model provider (anthropic / openai):
+- Model provider (anthropic / openai / copilot):
 
 ## Logs / output
 Paste any relevant error messages or terminal output here.

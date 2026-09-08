@@ -6,6 +6,8 @@ import yaml
 
 DEFAULT_CONFIG: dict = {
     "model": "anthropic",
+    "copilot_model": None,
+    "copilot_timeout": 120,
     "max_chars_per_file": 20000,
     "batch_limit": 60,
     "guidelines": None,  # None = use built-in default; set to a path string to override

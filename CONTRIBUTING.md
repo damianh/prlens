@@ -75,6 +75,11 @@ pre-commit run --all-files
 5. Add the optional SDK to `packages/core/pyproject.toml` under `[project.optional-dependencies]`
 6. Write provider-specific tests in `packages/core/tests/test_providers.py`
 
+Providers that require a newer Python version must use an environment marker in
+their optional dependency and fail clearly when selected on unsupported Python.
+The Copilot provider is also required to remain tool-free and fail closed so a
+provider error cannot be posted as an approval.
+
 ## Adding a New Store Backend
 
 1. Create `packages/store/src/prlens_store/your_backend.py`
