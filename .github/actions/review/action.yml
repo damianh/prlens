@@ -1,17 +1,17 @@
 name: 'AI Code Reviewer'
-description: 'Reviews GitHub PRs using AI (Claude or GPT-4o) and posts inline comments.'
+description: 'Reviews GitHub PRs using Anthropic, OpenAI, or GitHub Copilot and posts inline comments.'
 
 inputs:
   version:
-    description: 'Version of prlens to install (e.g. 0.1.8). Pin this in your workflow for reproducible builds.'
+    description: 'PyPI version for Anthropic/OpenAI. Copilot installs from this action revision.'
     required: false
     default: '0.1.10'
   model:
-    description: 'AI model provider: anthropic or openai'
+    description: 'AI model provider: anthropic, openai, or copilot'
     required: false
     default: 'anthropic'
   github-token:
-    description: 'GitHub token with pull-request write permissions'
+    description: 'GitHub token with pull-request write permissions and, for Copilot, copilot-requests write'
     required: true
   anthropic-api-key:
     description: 'Anthropic API key (required when model is anthropic)'
@@ -42,9 +42,40 @@ runs:
       with:
         python-version: '3.12'
 
+    - name: Validate Copilot workflow safety
+      if: inputs.model == 'copilot'
+      shell: bash
+      env:
+        PRLENS_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PRLENS_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        PRLENS_REPOSITORY: ${{ github.repository }}
+      run: |
+        if [ "$PRLENS_HEAD_REPOSITORY" != "$PRLENS_REPOSITORY" ]; then
+          echo "::error::Copilot reviews of pull requests from forks are disabled."
+          exit 1
+        fi
+        if [ -z "$PRLENS_BASE_SHA" ] || [ "$(git rev-parse HEAD)" != "$PRLENS_BASE_SHA" ]; then
+          echo "::error::Copilot requires the workspace to be checked out at the pull request base SHA."
+          exit 1
+        fi
+
     - name: Install prlens
+      if: inputs.model != 'copilot'
       shell: bash
       run: pip install "prlens[${{ inputs.model }}]==${{ inputs.version }}"
+
+    - name: Install prlens with Copilot support
+      if: inputs.model == 'copilot'
+      shell: bash
+      env:
+        PRLENS_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        action_root="$(cd "$PRLENS_ACTION_PATH/../../.." && pwd)"
+        pip install \
+          "$action_root/packages/core[copilot]" \
+          "$action_root/packages/store" \
+          "$action_root/packages/cli"
+        python -m copilot download-runtime
 
     - name: Run code review
       shell: bash

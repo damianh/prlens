@@ -4,7 +4,9 @@
 
 - Python 3.9 or later
 - A GitHub account with access to the repository you want to review
-- An API key for at least one AI provider (Anthropic or OpenAI)
+- An Anthropic/OpenAI API key, or eligible organization-billed GitHub Copilot usage
+
+The Copilot provider requires Python 3.11 or later.
 
 ---
 
@@ -15,10 +17,19 @@ Install with your preferred AI provider:
 ```bash
 pip install 'prlens[anthropic]'   # Claude (default)
 pip install 'prlens[openai]'      # GPT-4o
-pip install 'prlens[all]'         # both providers
+pip install 'prlens[all]'         # all providers available on this Python version
 ```
 
 Installing `prlens` automatically pulls in `prlens-core` and `prlens-store`.
+
+The Copilot provider is currently available from this fork rather than upstream PyPI 0.1.10:
+
+```bash
+git clone https://github.com/damianh/prlens.git
+cd prlens
+pip install 'packages/core[copilot]' packages/store packages/cli
+python -m copilot download-runtime
+```
 
 ---
 
@@ -39,7 +50,7 @@ gh auth login   # run once
 # no GITHUB_TOKEN needed after this
 ```
 
-The token must have `pull_requests: write` permission on the target repository.
+The token must have `pull_requests: write` permission on the target repository. Copilot does not use the local `gh auth token` fallback: it requires an explicit `GITHUB_TOKEN`, and Actions must also grant `copilot-requests: write`.
 
 ---
 

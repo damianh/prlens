@@ -32,11 +32,29 @@ logger = logging.getLogger(__name__)
 # Shared defaults — subclasses may override as class attributes if needed.
 _MAX_RETRIES = 3
 _MAX_TOKENS = 4096
+_SEVERITIES = {"critical", "major", "minor", "nitpick"}
+
+
+class ProviderError(RuntimeError):
+    """Base class for provider failures that must abort a review."""
+
+
+class ProviderCallError(ProviderError):
+    """Raised when a strict provider cannot complete an API call."""
+
+
+class ProviderResponseError(ProviderError):
+    """Raised when a strict provider returns an invalid review payload."""
+
+
+class ProviderConfigurationError(ProviderError, ImportError):
+    """Raised when a provider cannot be initialized safely."""
 
 
 class BaseReviewer(ABC):
     MAX_RETRIES: int = _MAX_RETRIES
     MAX_TOKENS: int = _MAX_TOKENS
+    FAIL_CLOSED: bool = False
 
     # ------------------------------------------------------------------ #
     # Public interface                                                     #
@@ -83,7 +101,7 @@ class BaseReviewer(ABC):
     def _is_retryable(self, e: Exception) -> bool:
         """Return True if the exception is transient and worth retrying.
 
-        Both anthropic and openai exceptions expose a status_code attribute for
+        Anthropic and OpenAI exceptions expose a status_code attribute for
         HTTP errors. 429 (rate limit) and 5xx (server errors) are transient.
         4xx errors other than 429 — auth failures, permission errors, invalid
         requests — will never succeed on retry and are rejected immediately.
@@ -113,6 +131,8 @@ class BaseReviewer(ABC):
                         getattr(e, "status_code", "unknown"),
                         e,
                     )
+                    if self.FAIL_CLOSED:
+                        raise ProviderCallError(f"{self.__class__.__name__} request failed.") from e
                     return None
                 if attempt == self.MAX_RETRIES - 1:
                     logger.error(
@@ -121,6 +141,10 @@ class BaseReviewer(ABC):
                         self.MAX_RETRIES,
                         e,
                     )
+                    if self.FAIL_CLOSED:
+                        raise ProviderCallError(
+                            f"{self.__class__.__name__} request failed after {self.MAX_RETRIES} attempts."
+                        ) from e
                     return None
                 delay = 2**attempt
                 logger.warning(
@@ -161,7 +185,7 @@ Rules:
     ) -> str:
         """Build the per-file user prompt including any codebase context.
 
-        Kept in base so both providers produce structurally identical prompts.
+        Kept in base so every provider produces structurally identical prompts.
         The output format instructions are here rather than in the system
         prompt because they are specific to the file being reviewed, not to
         the reviewer's general behaviour.
@@ -217,11 +241,33 @@ Do not return any text outside the JSON block."""
             # the response in — NOT backticks inside comment string values.
             cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
             cleaned = re.sub(r"\s*```$", "", cleaned.strip())
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
+            parsed = json.loads(cleaned)
+            if self.FAIL_CLOSED:
+                self._validate_comments(parsed)
+            return parsed
+        except (json.JSONDecodeError, ProviderResponseError):
             logger.warning(
                 "%s: failed to parse response as JSON: %s",
                 self.__class__.__name__,
                 raw[:200],
             )
+            if self.FAIL_CLOSED:
+                raise ProviderResponseError(f"{self.__class__.__name__} returned an invalid review response.")
             return []
+
+    @staticmethod
+    def _validate_comments(parsed) -> None:
+        """Validate the review schema used by fail-closed providers."""
+        if not isinstance(parsed, list):
+            raise ProviderResponseError("Review response must be a JSON list.")
+        for index, comment in enumerate(parsed):
+            if not isinstance(comment, dict):
+                raise ProviderResponseError(f"Review comment {index} must be an object.")
+            line = comment.get("line")
+            if isinstance(line, bool) or not isinstance(line, int) or line <= 0:
+                raise ProviderResponseError(f"Review comment {index} has an invalid line.")
+            if comment.get("severity") not in _SEVERITIES:
+                raise ProviderResponseError(f"Review comment {index} has an invalid severity.")
+            text = comment.get("comment")
+            if not isinstance(text, str) or not text.strip():
+                raise ProviderResponseError(f"Review comment {index} has an invalid comment.")

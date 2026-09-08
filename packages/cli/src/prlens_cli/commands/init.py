@@ -11,6 +11,7 @@ Why an init wizard:
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -56,6 +57,34 @@ jobs:
             --yes
 """
 
+_COPILOT_WORKFLOW_TEMPLATE = """\
+name: PR Lens Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      copilot-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.base.sha }}}}
+          persist-credentials: false
+
+      - uses: damianh/prlens/.github/actions/review@{action_ref}
+        with:
+          model: copilot
+          github-token: ${{{{ github.token }}}}
+"""
+
 
 @click.command("init")
 @click.option("--repo", default=None, help="GitHub repository (owner/name). Auto-detected from git remote.")
@@ -78,20 +107,29 @@ def init_cmd(repo: str | None):
     # --- Choose provider ---
     provider = click.prompt(
         "AI provider",
-        type=click.Choice(["anthropic", "openai"]),
+        type=click.Choice(["anthropic", "openai", "copilot"]),
         default="anthropic",
     )
 
-    api_key_env = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+    api_key_env = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }.get(provider)
 
     # --- Choose store backend ---
     console.print("\nReview history store:")
     console.print("  [bold]none[/bold]    — no persistence (default)")
     console.print("  [bold]sqlite[/bold]  — local SQLite file (good for solo use)")
-    console.print("  [bold]gist[/bold]    — shared GitHub Gist, zero infrastructure (recommended for teams)")
+    if provider != "copilot":
+        console.print("  [bold]gist[/bold]    — shared GitHub Gist, zero infrastructure (recommended for teams)")
+    store_choices = ["none", "sqlite"] if provider == "copilot" else ["none", "sqlite", "gist"]
+    if provider == "copilot":
+        console.print(
+            "  [dim]gist is omitted for token-only Copilot Actions because GITHUB_TOKEN has no Gist scope.[/dim]"
+        )
     store_type = click.prompt(
         "Store backend",
-        type=click.Choice(["none", "sqlite", "gist"]),
+        type=click.Choice(store_choices),
         default="none",
     )
 
@@ -126,12 +164,24 @@ def init_cmd(repo: str | None):
     # --- GitHub Actions workflow ---
     setup_ci = click.confirm("\nGenerate .github/workflows/prlens.yml for GitHub Actions?", default=True)
     if setup_ci:
-        _write_workflow(provider, api_key_env)
+        action_ref = None
+        if provider == "copilot":
+            action_ref = click.prompt(
+                "Copilot-enabled damianh/prlens action commit SHA",
+                value_proc=_validate_commit_sha,
+            )
+        _write_workflow(provider, api_key_env, action_ref=action_ref)
         console.print("[green]Created .github/workflows/prlens.yml[/green]")
-        console.print(
-            f"\n[yellow]Remember to add [bold]{api_key_env}[/bold] to your "
-            "GitHub repository secrets (Settings → Secrets → Actions).[/yellow]"
-        )
+        if provider == "copilot":
+            console.print(
+                "\n[yellow]Enable organization-billed Copilot CLI usage and keep "
+                "[bold]copilot-requests: write[/bold] permission. Fork PRs are skipped.[/yellow]"
+            )
+        else:
+            console.print(
+                f"\n[yellow]Remember to add [bold]{api_key_env}[/bold] to your "
+                "GitHub repository secrets (Settings → Secrets → Actions).[/yellow]"
+            )
 
     console.print("\n[bold green]Setup complete![/bold green]")
     console.print("Run a review with: [bold]prlens review --repo {repo} --pr <number>[/bold]".format(repo=repo))
@@ -226,11 +276,25 @@ def _get_version() -> str:
         return "0.1.8"
 
 
-def _write_workflow(provider: str, api_key_env: str) -> None:
+def _validate_commit_sha(value: str) -> str:
+    """Require an immutable full commit SHA for the fork action."""
+    value = value.strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", value):
+        raise click.BadParameter("enter a full 40-character commit SHA")
+    return value.lower()
+
+
+def _write_workflow(provider: str, api_key_env: str | None, action_ref: str | None = None) -> None:
     """Write the GitHub Actions workflow file."""
     workflow_dir = Path(".github/workflows")
     workflow_dir.mkdir(parents=True, exist_ok=True)
     workflow_path = workflow_dir / "prlens.yml"
-    workflow_path.write_text(
-        _WORKFLOW_TEMPLATE.format(provider=provider, api_key_env=api_key_env, version=_get_version())
-    )
+    if provider == "copilot":
+        if not action_ref:
+            raise ValueError("A pinned action commit SHA is required for the Copilot workflow.")
+        content = _COPILOT_WORKFLOW_TEMPLATE.format(action_ref=_validate_commit_sha(action_ref))
+    else:
+        if not api_key_env:
+            raise ValueError(f"An API key environment variable is required for {provider}.")
+        content = _WORKFLOW_TEMPLATE.format(provider=provider, api_key_env=api_key_env, version=_get_version())
+    workflow_path.write_text(content)

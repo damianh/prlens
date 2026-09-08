@@ -2,8 +2,12 @@
 # Copy this file to your repository root and customize it.
 # All fields are optional — built-in defaults apply when not set.
 
-# AI model provider: anthropic (Claude) or openai (GPT-4o)
+# AI model provider: anthropic (Claude), openai (GPT-4o), or copilot
 model: anthropic
+
+# Copilot uses the runtime default model when unset and requires Python 3.11+.
+# copilot_model: gpt-5
+copilot_timeout: 120
 
 # Maximum characters of diff and file content sent to the AI per file.
 # Increase this for models with larger context windows.

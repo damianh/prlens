@@ -8,6 +8,8 @@ from prlens_core.config import load_config, load_guidelines
 def test_defaults_applied_when_no_config_file(tmp_path):
     config = load_config(config_path=str(tmp_path / "nonexistent.yml"))
     assert config["model"] == "anthropic"
+    assert config["copilot_model"] is None
+    assert config["copilot_timeout"] == 120
     assert config["batch_limit"] == 60
     assert config["guidelines"] is None
     assert config["exclude"] == []

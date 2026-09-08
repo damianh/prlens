@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
 from prlens_cli.cli import _build_store, main
+from prlens_core.providers.base import ProviderCallError
 from prlens_store.gist import GistStore
 from prlens_store.noop import NoOpStore
 from prlens_store.sqlite import SQLiteStore
@@ -103,8 +104,48 @@ class TestCLIValidation:
         assert result.exit_code != 0
         assert "OPENAI_API_KEY" in result.output
 
+    def test_copilot_requires_explicit_github_token(self, mocker, monkeypatch):
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        config = _make_config(github_token="gh-cli-token", model="copilot", anthropic_key=None)
+        _patch_common(mocker, config=config, token="gh-cli-token")
+
+        result = CliRunner().invoke(main, ["review", "--repo", "owner/repo", "--pr", "1"])
+
+        assert result.exit_code != 0
+        assert "explicit GITHUB_TOKEN" in result.output
+
+    def test_copilot_uses_explicit_github_token(self, mocker, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+        config = _make_config(github_token="workflow-token", model="copilot", anthropic_key=None)
+        _patch_common(mocker, config=config, token="workflow-token")
+        mocker.patch("prlens_cli.commands.review.get_repo", return_value=MagicMock())
+        mocker.patch("prlens_cli.commands.review.get_pull", return_value=MagicMock(title="Fix bug"))
+        mock_run = mocker.patch("prlens_cli.commands.review.run_review", return_value=None)
+
+        result = CliRunner().invoke(main, ["review", "--repo", "owner/repo", "--pr", "1", "--yes"])
+
+        assert result.exit_code == 0
+        assert mock_run.call_args.kwargs["config"]["github_token"] == "workflow-token"
+
 
 class TestCLIRunReview:
+    def test_provider_failure_is_reported_without_saving(self, mocker, monkeypatch):
+        monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+        config = _make_config(github_token="workflow-token", model="copilot", anthropic_key=None)
+        _, mock_store = _patch_common(mocker, config=config, token="workflow-token")
+        mocker.patch("prlens_cli.commands.review.get_repo", return_value=MagicMock())
+        mocker.patch("prlens_cli.commands.review.get_pull", return_value=MagicMock(title="Fix bug"))
+        mocker.patch(
+            "prlens_cli.commands.review.run_review",
+            side_effect=ProviderCallError("CopilotReviewer request failed."),
+        )
+
+        result = CliRunner().invoke(main, ["review", "--repo", "owner/repo", "--pr", "1", "--yes"])
+
+        assert result.exit_code != 0
+        assert "CopilotReviewer request failed" in result.output
+        mock_store.save.assert_not_called()
+
     def test_calls_run_review_with_correct_args(self, mocker):
         _patch_common(mocker)
         mocker.patch("prlens_cli.commands.review.get_repo", return_value=MagicMock())

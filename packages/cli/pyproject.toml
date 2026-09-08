@@ -33,6 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["prlens-core[anthropic]"]
 openai = ["prlens-core[openai]"]
+copilot = ["prlens-core[copilot]"]
 all = ["prlens-core[all]"]
 dev = [
     "pytest>=8.0",

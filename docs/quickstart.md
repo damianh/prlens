@@ -11,11 +11,13 @@ prlens init
 
 The wizard will:
 1. Auto-detect your GitHub repository from `git remote`
-2. Ask which AI provider to use (`anthropic` or `openai`)
+2. Ask which AI provider to use (`anthropic`, `openai`, or `copilot`)
 3. Ask which history store to use (`none`, `sqlite`, or `gist`)
 4. Optionally generate `.github/workflows/prlens.yml` for CI
 
-After `init`, commit `.prlens.yml` (and the workflow file if generated). Every developer on the team can then run reviews with no extra setup if they have `gh` installed and are logged in.
+After `init`, commit `.prlens.yml` (and the workflow file if generated). Anthropic and OpenAI users can reuse a local `gh` login for GitHub API access. Copilot requires an explicit `GITHUB_TOKEN`.
+
+For Copilot, use Python 3.11+ and install this fork's local packages with the `copilot` extra before running `prlens init`. The wizard generates a GitHub Actions workflow pinned to the full fork commit SHA you provide; Copilot itself requires the workflow's explicit `GITHUB_TOKEN`.
 
 ---
 

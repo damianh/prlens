@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from prlens_core.providers.base import ProviderCallError
 from prlens_core.reviewer import (
     ReviewSummary,
     _get_reviewer,
@@ -306,6 +307,18 @@ class TestGetReviewer:
         _get_reviewer({"model": "openai", "openai_api_key": "oai-key"})
         mock_cls.assert_called_once_with(api_key="oai-key")
 
+    def test_returns_copilot_reviewer(self, mocker):
+        mock_cls = mocker.patch("prlens_core.reviewer.CopilotReviewer")
+        _get_reviewer(
+            {
+                "model": "copilot",
+                "github_token": "gh-token",
+                "copilot_model": "gpt-5",
+                "copilot_timeout": 45,
+            }
+        )
+        mock_cls.assert_called_once_with(github_token="gh-token", model="gpt-5", timeout=45)
+
     def test_raises_for_unknown_model(self):
         with pytest.raises(ValueError, match="Unknown model provider"):
             _get_reviewer({"model": "gemini", "anthropic_api_key": None})
@@ -420,6 +433,17 @@ def _setup_run_review(mocker, reviewer_comments=None, file_fetch_error=None, big
 
 
 class TestRunReviewPosting:
+    def test_provider_failure_aborts_without_posting_review(self, mocker):
+        mock_pr, mock_repo = _setup_run_review(mocker)
+        failed_reviewer = MagicMock()
+        failed_reviewer.review.side_effect = ProviderCallError("CopilotReviewer request failed.")
+        mocker.patch("prlens_core.reviewer._get_reviewer", return_value=failed_reviewer)
+
+        with pytest.raises(ProviderCallError):
+            run_review("owner/repo", 1, _base_config(), auto_confirm=True, repo_obj=mock_repo)
+
+        mock_pr.create_review.assert_not_called()
+
     def test_posts_approve_auto_confirm(self, mocker):
         mock_pr, mock_repo = _setup_run_review(mocker, reviewer_comments=[])
         run_review("owner/repo", 1, _base_config(), auto_confirm=True, repo_obj=mock_repo)

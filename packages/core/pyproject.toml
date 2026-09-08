@@ -18,7 +18,12 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.25"]
 openai = ["openai>=1.0"]
-all = ["anthropic>=0.25", "openai>=1.0"]
+copilot = ["github-copilot-sdk==1.0.13; python_version >= '3.11'"]
+all = [
+    "anthropic>=0.25",
+    "openai>=1.0",
+    "github-copilot-sdk==1.0.13; python_version >= '3.11'",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
