@@ -9,8 +9,10 @@ differs between implementations: the SDK client setup and _call_api.
 import json
 from unittest.mock import patch
 
+import pytest
+
 from prlens_core.providers.anthropic import AnthropicReviewer
-from prlens_core.providers.base import BaseReviewer
+from prlens_core.providers.base import BaseReviewer, ProviderCallError
 from prlens_core.providers.openai import OpenAIReviewer
 from prlens_core.utils.context import RepoContext
 
@@ -131,6 +133,26 @@ def _http_error(status_code: int, message: str = "error") -> Exception:
 
 
 class TestBaseReviewerRetry:
+    @pytest.mark.parametrize("status", [403, 503])
+    @pytest.mark.parametrize("safe", [True, False])
+    def test_strict_failure_only_propagates_safe_details(self, status, safe):
+        error = ProviderCallError("Safe diagnostic.") if safe else RuntimeError("Private SDK response.")
+        error.status_code = status
+
+        class _StrictReviewer(BaseReviewer):
+            FAIL_CLOSED = True
+
+            def _call_api(self, system_prompt, user_prompt):
+                raise error
+
+        with patch("prlens_core.providers.base.time.sleep"), pytest.raises(ProviderCallError) as raised:
+            _StrictReviewer().review("desc", "f.py", "+x", "x=1", "guidelines")
+
+        assert ("Safe diagnostic." in str(raised.value)) is safe
+        assert "Private SDK response." not in str(raised.value)
+        assert raised.value.__cause__ is error
+        assert ("after 3 attempts" in str(raised.value)) is (status == 503)
+
     def test_returns_none_after_max_retries(self):
         """When _call_api raises on every attempt, review() returns []."""
 

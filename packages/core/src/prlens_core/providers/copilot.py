@@ -3,19 +3,50 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 import logging
 import os
+import re
 import sys
 import tempfile
 import time
 from typing import Any
 
-from prlens_core.providers.base import BaseReviewer, ProviderConfigurationError
+from prlens_core.providers.base import BaseReviewer, ProviderCallError, ProviderConfigurationError
 
 logger = logging.getLogger(__name__)
 
 _SDK_VERSION = "1.0.13"
 _CLEANUP_TIMEOUT_SECONDS = 5.0
+_PRIVATE_SDK_CALL = ContextVar("prlens_private_copilot_call", default=False)
+_SDK_LOGGERS = ("copilot", "copilot.client", "copilot.session", "copilot._jsonrpc")
+_REMEDIATIONS = {
+    "sign_in",
+    "switch_account",
+    "show_account",
+    "review_sandbox_policy",
+    "allow_sandbox_outbound",
+}
+# Documented SessionErrorData examples in SDK v1.0.13, not exhaustive enums.
+_ERROR_REASONS = {
+    "authentication": ("Copilot reported an authentication failure; check workflow token authentication.", False),
+    "authorization": ("Copilot reported an authorization failure; check account permissions and policy.", False),
+    "quota": ("Copilot reported a quota or billing limit; check organization usage and billing.", False),
+    "rate_limit": ("Copilot reported throttling; check the reported rate-limit code.", True),
+    "context_limit": ("Copilot reported a context limit; reduce the review prompt size.", False),
+    "query": ("Copilot reported a query failure; check request configuration and model availability.", False),
+}
+_ERROR_CODES = {
+    "rate_limit": {
+        "user_weekly_rate_limited",
+        "user_global_rate_limited",
+        "rate_limited",
+        "user_model_rate_limited",
+        "integration_rate_limited",
+    },
+    "quota": {"quota_exceeded", "session_quota_exceeded", "billing_not_configured"},
+}
 _PASSTHROUGH_ENV_VARS = {
     "CI",
     "GITHUB_ACTIONS",
@@ -38,12 +69,34 @@ _PASSTHROUGH_ENV_VARS = {
 }
 
 
-class CopilotRequestError(RuntimeError):
+class CopilotRequestError(ProviderCallError):
     """A safe, classified Copilot failure for the shared retry loop."""
 
-    def __init__(self, message: str, *, retryable: bool):
+    def __init__(self, message: str, *, retryable: bool, status_code: int | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.status_code = status_code
+
+
+class _PrivateSDKLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _PRIVATE_SDK_CALL.get()
+
+
+@contextmanager
+def _private_sdk_logging():
+    # SDK warnings can contain runtime stderr or exception tracebacks with prompt data.
+    log_filter = _PrivateSDKLogFilter()
+    loggers = [logging.getLogger(name) for name in _SDK_LOGGERS]
+    for sdk_logger in loggers:
+        sdk_logger.addFilter(log_filter)
+    token = _PRIVATE_SDK_CALL.set(True)
+    try:
+        yield
+    finally:
+        _PRIVATE_SDK_CALL.reset(token)
+        for sdk_logger in loggers:
+            sdk_logger.removeFilter(log_filter)
 
 
 def _load_sdk():
@@ -88,20 +141,26 @@ class CopilotReviewer(BaseReviewer):
 
     def _call_api(self, system_prompt: str, user_prompt: str) -> str:
         try:
-            return asyncio.run(self._call_api_async(system_prompt, user_prompt))
+            with _private_sdk_logging():
+                return asyncio.run(self._call_api_async(system_prompt, user_prompt))
         except CopilotRequestError:
             raise
-        except (TimeoutError, ConnectionError, OSError) as exc:
-            raise CopilotRequestError("Copilot request timed out or lost its connection.", retryable=True) from exc
         except Exception as exc:
-            status_code = self._find_status_code(exc)
-            retryable = status_code is None or status_code == 429 or status_code >= 500
-            raise CopilotRequestError("Copilot request failed.", retryable=retryable) from exc
+            raise self._request_error(exc, phase="setup") from exc
 
     async def _call_api_async(self, system_prompt: str, user_prompt: str) -> str:
         deadline = time.monotonic() + self.timeout
         client = None
         session = None
+        session_error = None
+        unsubscribe = None
+        phase = "runtime_start"
+
+        def observe(event):
+            nonlocal session_error
+            event_type = getattr(event, "type", None)
+            if getattr(event_type, "value", event_type) == "session.error":
+                session_error = event.data
 
         with tempfile.TemporaryDirectory(prefix="prlens-copilot-") as temp_dir:
             working_directory = os.path.join(temp_dir, "workspace")
@@ -125,7 +184,9 @@ class CopilotReviewer(BaseReviewer):
 
             try:
                 await asyncio.wait_for(client.start(), timeout=self._remaining(deadline))
+                phase = "create_session"
                 session_options: dict[str, Any] = {
+                    "on_event": observe,
                     "available_tools": [],
                     "tools": [],
                     "system_message": {"mode": "append", "content": system_prompt},
@@ -154,6 +215,10 @@ class CopilotReviewer(BaseReviewer):
                     client.create_session(**session_options),
                     timeout=self._remaining(deadline),
                 )
+                unsubscribe = session.on(observe)
+                if session_error is not None:
+                    raise self._request_error(None, phase=phase, session_error=session_error)
+                phase = "send_and_wait"
                 try:
                     response = await session.send_and_wait(
                         user_prompt,
@@ -162,40 +227,171 @@ class CopilotReviewer(BaseReviewer):
                     )
                 except TimeoutError as exc:
                     await self._abort(session)
-                    raise CopilotRequestError("Copilot request timed out.", retryable=True) from exc
+                    raise self._request_error(exc, phase=phase, session_error=session_error) from exc
 
+                if session_error is not None:
+                    raise self._request_error(None, phase=phase, session_error=session_error)
                 content = getattr(getattr(response, "data", None), "content", None)
                 if not isinstance(content, str) or not content.strip():
                     raise CopilotRequestError("Copilot returned no review content.", retryable=False)
                 return content.strip()
+            except CopilotRequestError:
+                raise
+            except Exception as exc:
+                raise self._request_error(exc, phase=phase, session_error=session_error) from exc
             finally:
+                if unsubscribe is not None:
+                    unsubscribe()
                 await self._cleanup(client, session)
 
     def _deny_permission(self, _request, _invocation):
         return self._permission_reject_type(feedback="PRLens disables all Copilot tools.")
 
     @classmethod
-    def _find_status_code(cls, error: Exception) -> int | None:
-        status_code = getattr(error, "status_code", None)
-        if isinstance(status_code, int):
-            return status_code
-        data = getattr(error, "data", None)
-        return cls._find_status_code_in_data(data)
+    def _request_error(cls, error: Exception | None, *, phase: str, session_error=None) -> CopilotRequestError:
+        status = cls._http_status(getattr(session_error, "status_code", None))
+        if status is None and error is not None:
+            status = cls._find_status_code(error)
+        message = getattr(session_error, "message", "")
+        if not isinstance(message, str):
+            message = ""
+        if status is None:
+            status = cls._status_from_message(message)
+        messages = [message] + ([str(item)[:16384] for item in cls._error_chain(error)] if error is not None else [])
+        error_type = getattr(session_error, "error_type", None)
+        if not isinstance(error_type, str) or error_type not in {*_ERROR_REASONS, "notification"}:
+            error_type = "unknown"
+        error_code = getattr(session_error, "error_code", None)
+        if not isinstance(error_code, str) or error_code not in _ERROR_CODES.get(error_type, set()):
+            error_code = "unknown"
+        reason, retryable = cls._failure_reason(status, messages, error, error_type)
+        remediation = getattr(session_error, "remediation", None)
+        remediation = getattr(remediation, "value", remediation)
+        if not isinstance(remediation, str) or remediation not in _REMEDIATIONS:
+            remediation = "none_or_unknown"
+        if status is None and remediation != "none_or_unknown":
+            retryable = False
+        details = [
+            f"phase={phase}",
+            f"source={'session.error' if session_error is not None else 'exception'}",
+            f"status={status if status is not None else 'unknown'}",
+            f"error_type={error_type}",
+            f"error_code={error_code}",
+            f"remediation={remediation}",
+            f"sdk_expected={_SDK_VERSION}",
+        ]
+        for item in cls._error_chain(error):
+            rpc_code = getattr(item, "code", None)
+            if type(rpc_code) is int and -32768 <= rpc_code <= -32000:
+                details.append(f"rpc_code={rpc_code}")
+                if status is None and rpc_code in (-32600, -32601, -32602):
+                    reason = (
+                        "The runtime rejected the RPC request; check SDK/runtime compatibility and session options."
+                    )
+                    retryable = False
+                break
+        return CopilotRequestError(
+            f"Copilot request failed ({'; '.join(details)}). {reason}",
+            retryable=retryable,
+            status_code=status,
+        )
+
+    @staticmethod
+    def _failure_reason(
+        status: int | None, messages: list[str], error: Exception | None, error_type: str
+    ) -> tuple[str, bool]:
+        if error_type in ("quota", "context_limit"):
+            return _ERROR_REASONS[error_type]
+        if status == 401:
+            return "Authentication was rejected; check the workflow token authentication path.", False
+        if status == 403:
+            return (
+                "Access was denied; check this run's token permissions, account/organization policy and model access. "
+                "HTTP 403 alone does not identify which check failed.",
+                False,
+            )
+        if status == 429:
+            return "Copilot reported throttling or a usage limit.", True
+        if status is not None and status >= 500:
+            return "Copilot reported a server-side error.", True
+        if status is not None and 400 <= status < 500:
+            return "Copilot rejected the request; check the request configuration and model availability.", False
+        if error_type in _ERROR_REASONS:
+            return _ERROR_REASONS[error_type]
+        # Only emit application-authored text, never arbitrary SDK messages or snippets.
+        text = "\n".join(message[:16384] for message in messages).lower()
+        if re.search(r"\b(?:unauthorized|authentication failed|failed to authenticate|bad credentials)\b", text):
+            return "The SDK reported an authentication failure; check workflow token authentication.", False
+        if re.search(r"\b(?:forbidden|permission denied|access denied)\b", text):
+            return "The SDK reported an access denial; check token permissions, policy and model access.", False
+        if re.search(r"\b(?:unknown model|unsupported model|model not found|model is not available)\b", text):
+            return "The SDK reported an unavailable model; check model availability for this account.", False
+        if re.search(r"\b(?:rate limit|rate limited|too many requests)\b", text):
+            return "The SDK reported throttling or a usage limit.", True
+        if isinstance(error, TimeoutError) or re.search(r"\b(?:timed out|timeout)\b", text):
+            return "Copilot request timed out.", True
+        if isinstance(error, (ConnectionError, OSError)):
+            return "The runtime could not be reached or started; check runtime installation and network access.", True
+        return "No recognized failure reason was supplied; private SDK error text was omitted.", True
 
     @classmethod
-    def _find_status_code_in_data(cls, value) -> int | None:
+    def _find_status_code(cls, error: Exception) -> int | None:
+        errors = list(cls._error_chain(error))
+        for item in errors:
+            status_code = cls._http_status(getattr(item, "status_code", None))
+            if status_code is None:
+                status_code = cls._find_status_code_in_data(getattr(item, "data", None))
+            if status_code is not None:
+                return status_code
+        for item in errors:
+            status_code = cls._status_from_message(str(item))
+            if status_code is not None:
+                return status_code
+        return None
+
+    @staticmethod
+    def _error_chain(error: Exception | None):
+        seen = set()
+        while error is not None and id(error) not in seen and len(seen) < 8:
+            seen.add(id(error))
+            yield error
+            error = error.__cause__ or error.__context__
+
+    @staticmethod
+    def _http_status(value) -> int | None:
+        if isinstance(value, str) and re.fullmatch(r"[1-5][0-9]{2}", value):
+            return int(value)
+        if type(value) in (int, float) and 100 <= value <= 599 and int(value) == value:
+            return int(value)
+        return None
+
+    @staticmethod
+    def _status_from_message(message: str) -> int | None:
+        match = re.search(
+            r'\b(?:HTTP(?:/\d(?:\.\d)?)?\s+|status(?:[_ ]?code)?["\']?\s*[:=]?\s*)'
+            r"([45][0-9]{2})\b|\b(400|401|403|404|429)\s+"
+            r"(?:bad request|unauthorized|forbidden|not found|too many requests)\b",
+            message[:16384],
+            re.IGNORECASE,
+        )
+        return int(match.group(1) or match.group(2)) if match else None
+
+    @classmethod
+    def _find_status_code_in_data(cls, value, depth: int = 0) -> int | None:
+        if depth > 5:
+            return None
         if isinstance(value, dict):
             for key in ("status_code", "statusCode", "status"):
-                status_code = value.get(key)
-                if isinstance(status_code, int):
+                status_code = cls._http_status(value.get(key))
+                if status_code is not None:
                     return status_code
-            for nested in value.values():
-                status_code = cls._find_status_code_in_data(nested)
+            for nested in list(value.values())[:32]:
+                status_code = cls._find_status_code_in_data(nested, depth + 1)
                 if status_code is not None:
                     return status_code
         elif isinstance(value, (list, tuple)):
-            for nested in value:
-                status_code = cls._find_status_code_in_data(nested)
+            for nested in value[:32]:
+                status_code = cls._find_status_code_in_data(nested, depth + 1)
                 if status_code is not None:
                     return status_code
         return None
@@ -207,27 +403,31 @@ class CopilotReviewer(BaseReviewer):
             raise TimeoutError("Copilot request exceeded its deadline.")
         return remaining
 
-    @staticmethod
-    async def _abort(session) -> None:
+    @classmethod
+    async def _abort(cls, session) -> None:
         try:
             await asyncio.wait_for(session.abort(), timeout=_CLEANUP_TIMEOUT_SECONDS)
         except Exception as exc:
-            logger.warning("Could not abort the timed-out Copilot session: %s", exc)
+            logger.warning("Could not abort the timed-out Copilot session: %s", cls._request_error(exc, phase="abort"))
 
-    @staticmethod
-    async def _cleanup(client, session) -> None:
+    @classmethod
+    async def _cleanup(cls, client, session) -> None:
         if session is not None:
             try:
                 await asyncio.wait_for(session.disconnect(), timeout=_CLEANUP_TIMEOUT_SECONDS)
             except Exception as exc:
-                logger.warning("Could not disconnect the Copilot session cleanly: %s", exc)
+                logger.warning(
+                    "Could not disconnect the Copilot session cleanly: %s", cls._request_error(exc, phase="disconnect")
+                )
         if client is None:
             return
         try:
             await asyncio.wait_for(client.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS)
         except Exception as exc:
-            logger.warning("Could not stop the Copilot runtime cleanly: %s", exc)
+            logger.warning("Could not stop the Copilot runtime cleanly: %s", cls._request_error(exc, phase="stop"))
             try:
                 await asyncio.wait_for(client.force_stop(), timeout=_CLEANUP_TIMEOUT_SECONDS)
             except Exception as force_exc:
-                logger.error("Could not force-stop the Copilot runtime: %s", force_exc)
+                logger.error(
+                    "Could not force-stop the Copilot runtime: %s", cls._request_error(force_exc, phase="force_stop")
+                )

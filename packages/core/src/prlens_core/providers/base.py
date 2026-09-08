@@ -40,7 +40,7 @@ class ProviderError(RuntimeError):
 
 
 class ProviderCallError(ProviderError):
-    """Raised when a strict provider cannot complete an API call."""
+    """An API failure whose message is safe to display without a traceback."""
 
 
 class ProviderResponseError(ProviderError):
@@ -132,7 +132,8 @@ class BaseReviewer(ABC):
                         e,
                     )
                     if self.FAIL_CLOSED:
-                        raise ProviderCallError(f"{self.__class__.__name__} request failed.") from e
+                        detail = f" {e}" if isinstance(e, ProviderCallError) else ""
+                        raise ProviderCallError(f"{self.__class__.__name__} request failed.{detail}") from e
                     return None
                 if attempt == self.MAX_RETRIES - 1:
                     logger.error(
@@ -142,8 +143,9 @@ class BaseReviewer(ABC):
                         e,
                     )
                     if self.FAIL_CLOSED:
+                        detail = f" {e}" if isinstance(e, ProviderCallError) else ""
                         raise ProviderCallError(
-                            f"{self.__class__.__name__} request failed after {self.MAX_RETRIES} attempts."
+                            f"{self.__class__.__name__} request failed after {self.MAX_RETRIES} attempts.{detail}"
                         ) from e
                     return None
                 delay = 2**attempt
@@ -246,13 +248,14 @@ Do not return any text outside the JSON block."""
                 self._validate_comments(parsed)
             return parsed
         except (json.JSONDecodeError, ProviderResponseError):
+            if self.FAIL_CLOSED:
+                logger.warning("%s: invalid review response (content omitted).", self.__class__.__name__)
+                raise ProviderResponseError(f"{self.__class__.__name__} returned an invalid review response.") from None
             logger.warning(
                 "%s: failed to parse response as JSON: %s",
                 self.__class__.__name__,
                 raw[:200],
             )
-            if self.FAIL_CLOSED:
-                raise ProviderResponseError(f"{self.__class__.__name__} returned an invalid review response.")
             return []
 
     @staticmethod

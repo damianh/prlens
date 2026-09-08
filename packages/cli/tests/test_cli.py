@@ -4,6 +4,7 @@ import subprocess
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from prlens_cli.cli import _build_store, main
@@ -129,6 +130,38 @@ class TestCLIValidation:
 
 
 class TestCLIRunReview:
+    @pytest.mark.parametrize("retryable, attempts", [(False, 1), (True, 3)])
+    def test_copilot_diagnostic_survives_retry_and_cli_wrapping(self, mocker, monkeypatch, retryable, attempts):
+        from prlens_core.providers.copilot import CopilotRequestError, CopilotReviewer
+
+        monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+        config = _make_config(github_token="workflow-token", model="copilot", anthropic_key=None)
+        _, mock_store = _patch_common(mocker, config=config, token="workflow-token")
+        mocker.patch("prlens_cli.commands.review.get_repo", return_value=MagicMock())
+        mocker.patch("prlens_cli.commands.review.get_pull", return_value=MagicMock(title="Fix bug"))
+        mocker.patch("prlens_core.providers.copilot._load_sdk", return_value=(None, None, None))
+        mocker.patch("prlens_core.providers.base.time.sleep")
+        reviewer = CopilotReviewer("workflow-token")
+        diagnostic = "Copilot failed during send_and_wait (HTTP 429; rate limit exceeded)."
+        call_api = mocker.patch.object(
+            reviewer,
+            "_call_api",
+            side_effect=CopilotRequestError(diagnostic, retryable=retryable),
+        )
+        mocker.patch(
+            "prlens_cli.commands.review.run_review",
+            side_effect=lambda **kwargs: reviewer.review("desc", "file.py", "+bad()", "bad()", "rules"),
+        )
+
+        result = CliRunner().invoke(main, ["review", "--repo", "owner/repo", "--pr", "1", "--yes"])
+
+        assert result.exit_code != 0
+        assert diagnostic in result.output
+        assert "Traceback" not in result.output
+        assert "workflow-token" not in result.output
+        assert call_api.call_count == attempts
+        mock_store.save.assert_not_called()
+
     def test_provider_failure_is_reported_without_saving(self, mocker, monkeypatch):
         monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
         config = _make_config(github_token="workflow-token", model="copilot", anthropic_key=None)
